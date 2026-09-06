@@ -1,6 +1,6 @@
 # PlanetaryLens world fire feed
 
-Small, public NASA FIRMS VIIRS selection for PlanetaryLens. No application source,
+Small, public NASA FIRMS VIIRS selection for PlanetaryLens. No Android application source,
 NASA key, or raw downloads are published here. `build_feed.py` uses only Python's
 standard library and runs in GitHub Actions at minutes 17 and 47 of each hour.
 Scheduling can be delayed; every output carries its true generation time.
@@ -40,3 +40,9 @@ NASA FIRMS / LANCE, NASA and NOAA. VIIRS 375 m active fire products:
 [NASA data use and citation guidance](https://www.earthdata.nasa.gov/engage/open-data-services-software/data-use-policy).
 NASA Earth science data may be reused and redistributed under the cited policy.
 No NASA logo, satellite imagery, third-party map tiles or private user data are included.
+
+NOAA-20 product: https://doi.org/10.5067/FIRMS/VIIRS/VJ114IMGT_NRT.002
+NOAA-21 product: https://doi.org/10.5067/VIIRS/VJ214IMGTDL_NRT.002
+
+S-NPP is not a required source because NASA announced the end of its product delivery
+on November 1, 2026. NOAA-20 and NOAA-21 provide the global inputs used here.
