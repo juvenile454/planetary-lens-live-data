@@ -1,0 +1,42 @@
+# PlanetaryLens world fire feed
+
+Small, public NASA FIRMS VIIRS selection for PlanetaryLens. No application source,
+NASA key, or raw downloads are published here. `build_feed.py` uses only Python's
+standard library and runs in GitHub Actions at minutes 17 and 47 of each hour.
+Scheduling can be delayed; every output carries its true generation time.
+
+## Data contract
+
+- NASA FIRMS NOAA-20 and NOAA-21, worldwide, rolling 24 hours in UTC.
+- FRP **at least 50 MW**, nominal/high detection confidence.
+- At most **400 detections and 256 KiB** after filtering on the job host.
+- Selection takes the strongest point from each occupied 30-degree cell in turns,
+  preserving sparse regions before taking more detections from dense regions.
+- An unavailable, corrupt or outdated satellite source fails the whole refresh.
+  The previous published file is retained; the app refuses feeds older than 3 hours.
+- These are sampled thermal detections, not confirmed wildfires, perimeters or warnings.
+
+## Access and operation
+
+Set the repository Actions secret `FIRMS_MAP_KEY`, then run **Update world fire feed**.
+The job downloads two UTC calendar days per satellite on the runner, filters the
+exact last 24 hours, and publishes only `data/fire-hotspots.json`. A NASA key is
+never needed by the Android app. No unfiltered world data is sent to the phone.
+
+Run tests with `python3 -m unittest -v test_build_feed.py`. Run a local refresh with
+`FIRMS_MAP_KEY` in the process environment and `python3 build_feed.py`.
+`--input-dir` accepts a directory with the two named NASA CSV files for offline
+verification. Raw CSV files and credentials must stay outside this repository.
+
+The source of this publisher is maintained in the private app checkout under
+`services/fire-feed/`. Copy the Python files and this README to the data repository;
+copy `workflow.yml` to `.github/workflows/update-fire-feed.yml`.
+
+## Attribution and rights
+
+NASA FIRMS / LANCE, NASA and NOAA. VIIRS 375 m active fire products:
+[NASA API documentation](https://firms.modaps.eosdis.nasa.gov/api/area/),
+[FIRMS map](https://firms.modaps.eosdis.nasa.gov/map/),
+[NASA data use and citation guidance](https://www.earthdata.nasa.gov/engage/open-data-services-software/data-use-policy).
+NASA Earth science data may be reused and redistributed under the cited policy.
+No NASA logo, satellite imagery, third-party map tiles or private user data are included.

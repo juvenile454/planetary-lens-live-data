@@ -1,0 +1,6 @@
+__pycache__/
+*.csv
+*.tmp
+.env
+.env.*
+local.properties
