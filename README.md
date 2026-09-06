@@ -2,7 +2,7 @@
 
 Small, public NASA FIRMS VIIRS selection for PlanetaryLens. No Android application source,
 NASA key, or raw downloads are published here. `build_feed.py` uses only Python's
-standard library and runs in GitHub Actions at minutes 17 and 47 of each hour.
+standard library and is scheduled in GitHub Actions at minutes 7, 22, 37 and 52 of each hour.
 Scheduling can be delayed; every output carries its true generation time.
 
 ## Data contract
@@ -46,3 +46,5 @@ NOAA-21 product: https://doi.org/10.5067/VIIRS/VJ214IMGTDL_NRT.002
 
 S-NPP is not a required source because NASA announced the end of its product delivery
 on November 1, 2026. NOAA-20 and NOAA-21 provide the global inputs used here.
+
+Temporary HTTP 429/5xx and transport failures are retried at most three times with short bounded delays. Authentication and invalid input still fail without publishing. Public diagnostics distinguish timeouts, HTTP failures and connection failures using only fixed messages, never upstream URLs or payloads. The 15-minute schedule allows more recovery attempts before the app's three-hour freshness limit; GitHub scheduling delays remain possible and require freshness monitoring for production operation.

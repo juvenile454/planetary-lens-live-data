@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 import build_feed as feed
 
@@ -89,6 +89,67 @@ class FeedTest(unittest.TestCase):
             with patch("sys.argv", ["build_feed.py", "--output", str(path)]), patch.dict("os.environ", {"FIRMS_MAP_KEY": ""}):
                 self.assertEqual(1, feed.main())
             self.assertEqual("previous valid feed", path.read_text())
+
+    def test_transient_download_failure_retries_but_authentication_failure_does_not(self):
+        import urllib.error
+        secret = "a" * 32
+        response = MagicMock()
+        response.__enter__.return_value.read.return_value = b"csv fixture"
+        opener = MagicMock()
+        opener.open.side_effect = [urllib.error.HTTPError(secret, 503, "unavailable", {}, None), response]
+        with patch("urllib.request.build_opener", return_value=opener), patch("time.sleep") as sleep:
+            self.assertEqual(b"csv fixture", feed.download(secret, "VIIRS_NOAA20_NRT"))
+            self.assertEqual(2, opener.open.call_count)
+            sleep.assert_called_once_with(2)
+        opener.open.reset_mock()
+        opener.open.side_effect = urllib.error.HTTPError(secret, 403, "forbidden", {}, None)
+        with patch("urllib.request.build_opener", return_value=opener), patch("time.sleep") as sleep:
+            with self.assertRaises(ValueError): feed.download(secret, "VIIRS_NOAA20_NRT")
+            self.assertEqual(1, opener.open.call_count)
+            sleep.assert_not_called()
+
+    def test_diagnostics_allow_known_reasons_without_exposing_untrusted_messages(self):
+        self.assertEqual("NASA CSV schema missing", feed.safe_failure_reason(ValueError("NASA CSV schema missing")))
+        secret = "a" * 32
+        self.assertNotIn(secret, feed.safe_failure_reason(ValueError("Request failed: " + secret)))
+
+    def test_timeout_retries_are_bounded_and_report_a_safe_reason(self):
+        import urllib.error
+        secret = "a" * 32
+        for error in (TimeoutError(secret), urllib.error.URLError(TimeoutError(secret))):
+            opener = MagicMock()
+            opener.open.side_effect = error
+            with self.subTest(error=type(error).__name__), patch(
+                "urllib.request.build_opener", return_value=opener
+            ), patch("time.sleep") as sleep:
+                with self.assertRaises(ValueError) as result:
+                    feed.download(secret, "VIIRS_NOAA20_NRT")
+                self.assertEqual(3, opener.open.call_count)
+                self.assertEqual([2, 4], [call.args[0] for call in sleep.call_args_list])
+                self.assertEqual(
+                    "NASA download timed out for VIIRS_NOAA20_NRT", feed.safe_failure_reason(result.exception)
+                )
+                self.assertNotIn(secret, str(result.exception))
+
+    def test_exhausted_network_errors_keep_only_the_source_and_failure_category(self):
+        import urllib.error
+        secret = "a" * 32
+        for error, category in (
+            (urllib.error.HTTPError(secret, 503, secret, {}, None), "HTTP request failed"),
+            (urllib.error.URLError(secret), "connection failed"),
+        ):
+            opener = MagicMock()
+            opener.open.side_effect = error
+            with self.subTest(category=category), patch(
+                "urllib.request.build_opener", return_value=opener
+            ), patch("time.sleep"):
+                with self.assertRaises(ValueError) as result:
+                    feed.download(secret, "VIIRS_NOAA21_NRT")
+                self.assertEqual(3, opener.open.call_count)
+                self.assertEqual(
+                    f"NASA {category} for VIIRS_NOAA21_NRT", feed.safe_failure_reason(result.exception)
+                )
+                self.assertNotIn(secret, str(result.exception))
 
     def test_network_errors_do_not_expose_the_key(self):
         secret = "a" * 32

@@ -133,15 +133,49 @@ def download(key, source):
     # Two UTC calendar days cover the rolling 24-hour interval; filter exact times in build().
     url = f"https://firms.modaps.eosdis.nasa.gov/api/area/csv/{key}/{source}/world/2"
     request = urllib.request.Request(url, headers={"Accept": "text/csv", "User-Agent": "PlanetaryLens-FireFeed/1.0"})
-    try:
-        with urllib.request.build_opener(NoRedirect).open(request, timeout=45) as response:
-            content = response.read(MAX_INPUT_BYTES + 1)
-        if len(content) > MAX_INPUT_BYTES:
-            raise ValueError("NASA response exceeds input budget")
-        return content
-    except Exception:
-        # Exceptions can contain the request URL (including the key). Never forward it.
-        raise ValueError(f"NASA download failed for {source}") from None
+    for attempt in range(3):
+        try:
+            with urllib.request.build_opener(NoRedirect).open(request, timeout=45) as response:
+                content = response.read(MAX_INPUT_BYTES + 1)
+            if len(content) > MAX_INPUT_BYTES:
+                raise ValueError("NASA response exceeds input budget")
+            return content
+        except Exception as error:
+            transient = (
+                isinstance(error, urllib.error.HTTPError) and error.code in (429, 500, 502, 503, 504)
+            ) or (isinstance(error, (urllib.error.URLError, TimeoutError)) and
+                  not isinstance(error, urllib.error.HTTPError))
+            if transient and attempt < 2:
+                time.sleep(2 ** (attempt + 1))
+                continue
+            # Request URLs can contain the key. Forward only a fixed, known message.
+            if isinstance(error, TimeoutError) or (
+                isinstance(error, urllib.error.URLError) and isinstance(error.reason, TimeoutError)
+            ):
+                raise ValueError(f"NASA download timed out for {source}") from None
+            if isinstance(error, urllib.error.HTTPError):
+                raise ValueError(f"NASA HTTP request failed for {source}") from None
+            if isinstance(error, urllib.error.URLError):
+                raise ValueError(f"NASA connection failed for {source}") from None
+            raise ValueError(f"NASA download failed for {source}") from None
+
+
+def safe_failure_reason(error):
+    # Never print arbitrary upstream exceptions: float/date parsing and network errors may
+    # contain untrusted input or a credential-bearing URL. Only our fixed diagnostics qualify.
+    allowed = {
+        "NASA response exceeds input budget", "NASA CSV schema missing", "Non-finite NASA measurement",
+        "Invalid NASA measurement", "Unexpected NASA sensor", "Unexpected NASA confidence",
+        "Invalid NASA acquisition time", "NASA measurement is in the future",
+        "NASA satellite feed is empty or outdated", "Both global satellite feeds are required",
+        "Filtered feed exceeds mobile budget", "FIRMS_MAP_KEY is missing or invalid",
+    } | {
+        f"NASA {reason} for {source}"
+        for source in SOURCES
+        for reason in ("download failed", "download timed out", "HTTP request failed", "connection failed")
+    }
+    reason = str(error)
+    return reason if reason in allowed else "Unexpected input or processing error"
 
 
 def write_feed(path, content):
@@ -170,7 +204,7 @@ def main():
         print(f"Published selection: {len(document['hotspots'])} / {document['candidateCount']} detections, {len(content)} bytes")
     except Exception as error:
         # No raw upstream payload, secret, URL, or traceback in public workflow logs.
-        print(f"Feed refresh failed ({type(error).__name__}); previous output retained.", file=sys.stderr)
+        print(f"Feed refresh failed: {safe_failure_reason(error)}; previous output retained.", file=sys.stderr)
         return 1
     return 0
 
