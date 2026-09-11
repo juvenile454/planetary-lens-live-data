@@ -12,8 +12,9 @@ Scheduling can be delayed; every output carries its true generation time.
 - At most **400 detections and 256 KiB** after filtering on the job host.
 - Selection takes the strongest point from each occupied 30-degree cell in turns,
   preserving sparse regions before taking more detections from dense regions.
-- An unavailable, corrupt or outdated satellite source fails the whole refresh.
-  The previous published file is retained; the app refuses feeds older than 3 hours.
+- Individual unusable NRT rows are skipped. An unavailable, schema-invalid, empty
+  or outdated satellite source still fails the whole refresh. The previous
+  published file is retained; the app refuses feeds older than 3 hours.
 - These are sampled thermal detections, not confirmed wildfires, perimeters or warnings.
 
 ## Access and operation
@@ -47,4 +48,4 @@ NOAA-21 product: https://doi.org/10.5067/VIIRS/VJ214IMGTDL_NRT.002
 S-NPP is not a required source because NASA announced the end of its product delivery
 on November 1, 2026. NOAA-20 and NOAA-21 provide the global inputs used here.
 
-Temporary HTTP 429/5xx and transport failures are retried at most three times with short bounded delays. Authentication and invalid input still fail without publishing. Public diagnostics distinguish timeouts, HTTP failures and connection failures using only fixed messages, never upstream URLs or payloads. The 15-minute schedule allows more recovery attempts before the app's three-hour freshness limit; GitHub scheduling delays remain possible and require freshness monitoring for production operation.
+Temporary HTTP 429/5xx and transport failures are retried at most five times with short bounded delays, and both satellites are downloaded in parallel. Authentication failures and a missing/outdated satellite still fail without publishing. Public diagnostics distinguish timeouts, HTTP failures and connection failures using only fixed messages, never upstream URLs or payloads. The 15-minute GitHub schedule is best-effort: public repository cron jobs are often delayed by hours, so a local watchdog may dispatch this workflow when the published file grows stale. GitHub scheduling delays remain possible and require freshness monitoring for production operation.

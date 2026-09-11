@@ -45,7 +45,7 @@ class FeedTest(unittest.TestCase):
         self.assertEqual(NOW - 60 * 60 * 1000, latest)
 
     def test_refuses_malformed_low_quality_and_stale_sources(self):
-        for candidate in [row(latitude="91"), row(longitude="-181"), row(frp="nan"),
+        for candidate in [row(latitude="91"), row(longitude="-190"), row(frp="nan"),
                           row(frp="inf"), row(frp="-1"), row(acq_time="2460"),
                           row(acq_time="1.5"), row(acq_date="2026-09-07"),
                           row(satellite="N21"), row(instrument="MODIS"), row(confidence="x"),
@@ -124,8 +124,8 @@ class FeedTest(unittest.TestCase):
             ), patch("time.sleep") as sleep:
                 with self.assertRaises(ValueError) as result:
                     feed.download(secret, "VIIRS_NOAA20_NRT")
-                self.assertEqual(3, opener.open.call_count)
-                self.assertEqual([2, 4], [call.args[0] for call in sleep.call_args_list])
+                self.assertEqual(feed.MAX_DOWNLOAD_ATTEMPTS, opener.open.call_count)
+                self.assertEqual([2, 4, 8, 16], [call.args[0] for call in sleep.call_args_list])
                 self.assertEqual(
                     "NASA download timed out for VIIRS_NOAA20_NRT", feed.safe_failure_reason(result.exception)
                 )
@@ -145,11 +145,32 @@ class FeedTest(unittest.TestCase):
             ), patch("time.sleep"):
                 with self.assertRaises(ValueError) as result:
                     feed.download(secret, "VIIRS_NOAA21_NRT")
-                self.assertEqual(3, opener.open.call_count)
+                self.assertEqual(feed.MAX_DOWNLOAD_ATTEMPTS, opener.open.call_count)
                 self.assertEqual(
                     f"NASA {category} for VIIRS_NOAA21_NRT", feed.safe_failure_reason(result.exception)
                 )
                 self.assertNotIn(secret, str(result.exception))
+
+    def test_invalid_rows_are_skipped_when_the_source_still_has_fresh_data(self):
+        points, latest = feed.parse_csv(payload(
+            row(),
+            row(latitude="91"),
+            row(longitude="-190"),
+            row(frp="-1"),
+            row(frp="nan"),
+            row(confidence="nominal", frp="80", latitude="-40", longitude="170"),
+            row(acq_time="2460"),
+            row(satellite="N21"),
+        ), "VIIRS_NOAA20_NRT", NOW)
+        self.assertEqual([50.0, 80.0], [point["frp"] for point in points])
+        self.assertEqual("n", points[1]["confidence"])
+        self.assertEqual(-40.0, points[1]["lat"])
+        self.assertEqual(NOW - 60 * 60 * 1000, latest)
+
+    def test_dateline_longitude_is_wrapped_instead_of_failing_the_refresh(self):
+        points, _ = feed.parse_csv(payload(row(longitude="180.2", frp="60")), "VIIRS_NOAA20_NRT", NOW)
+        self.assertEqual(1, len(points))
+        self.assertAlmostEqual(-179.8, points[0]["lon"], places=4)
 
     def test_network_errors_do_not_expose_the_key(self):
         secret = "a" * 32

@@ -3,16 +3,19 @@
 
 import argparse
 import csv
+import http.client
 import io
 import json
 import math
 import os
 import re
+import socket
 import sys
 import time
 import urllib.error
 import urllib.request
 from collections import defaultdict, deque
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -23,11 +26,65 @@ MAX_INPUT_BYTES = 20 * 1024 * 1024  # per satellite, on the job host only
 WINDOW_MILLIS = 24 * 60 * 60 * 1000
 FUTURE_MILLIS = 5 * 60 * 1000
 SOURCE_MAX_AGE_MILLIS = 12 * 60 * 60 * 1000
+MAX_DOWNLOAD_ATTEMPTS = 5
 SOURCES = {
     "VIIRS_NOAA20_NRT": ("N20", "NOAA-20 VIIRS"),
     "VIIRS_NOAA21_NRT": ("N21", "NOAA-21 VIIRS"),
 }
 FIELDS = {"latitude", "longitude", "acq_date", "acq_time", "frp", "confidence", "satellite", "instrument"}
+CONFIDENCE_ALIASES = {"l": "l", "n": "n", "h": "h", "low": "l", "nominal": "n", "high": "h"}
+
+
+def normalize_coordinates(latitude, longitude):
+    # NRT geolocation can overshoot the dateline or poles by a fraction of a degree.
+    if abs(latitude) <= 90.01:
+        latitude = max(-90.0, min(90.0, latitude))
+    else:
+        return None
+    if abs(longitude) <= 181.0:
+        longitude = (longitude + 180.0) % 360.0 - 180.0
+        if longitude <= -180.0:
+            longitude = 180.0
+    else:
+        return None
+    return latitude, longitude
+
+
+def parse_row(row, satellite_code, satellite_name, now):
+    try:
+        latitude, longitude, power = (float(row[field]) for field in ("latitude", "longitude", "frp"))
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not all(math.isfinite(value) for value in (latitude, longitude, power)) or power < 0:
+        return None
+    coordinates = normalize_coordinates(latitude, longitude)
+    if coordinates is None:
+        return None
+    latitude, longitude = coordinates
+    if row.get("satellite") != satellite_code or row.get("instrument") != "VIIRS":
+        return None
+    confidence = CONFIDENCE_ALIASES.get(str(row.get("confidence", "")).strip().lower())
+    if confidence is None:
+        return None
+    clock = str(row.get("acq_time", "")).strip()
+    if not re.fullmatch(r"\d{1,4}", clock):
+        return None
+    try:
+        when = datetime.strptime(
+            str(row.get("acq_date", "")) + clock.zfill(4), "%Y-%m-%d%H%M"
+        ).replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+    measured = int(when.timestamp() * 1000)
+    if measured > now + FUTURE_MILLIS:
+        return None
+    record = None
+    if not (measured < now - WINDOW_MILLIS or power < MIN_FRP_MW or confidence == "l"):
+        record = {
+            "lat": latitude, "lon": longitude, "time": measured, "frp": power,
+            "confidence": confidence, "satellite": satellite_name,
+        }
+    return measured, record
 
 
 def parse_csv(payload, source, now):
@@ -40,30 +97,15 @@ def parse_csv(payload, source, now):
     latest = 0
     records = []
     for row in reader:
-        # Fail the complete refresh on corrupt input; never publish a silent partial globe.
-        latitude, longitude, power = (float(row[field]) for field in ("latitude", "longitude", "frp"))
-        if not all(math.isfinite(value) for value in (latitude, longitude, power)):
-            raise ValueError("Non-finite NASA measurement")
-        if not (-90 <= latitude <= 90 and -180 <= longitude <= 180 and power >= 0):
-            raise ValueError("Invalid NASA measurement")
-        if row["satellite"] != satellite_code or row["instrument"] != "VIIRS":
-            raise ValueError("Unexpected NASA sensor")
-        if row["confidence"] not in ("l", "n", "h"):
-            raise ValueError("Unexpected NASA confidence")
-        clock = row["acq_time"]
-        if not re.fullmatch(r"\d{1,4}", clock):
-            raise ValueError("Invalid NASA acquisition time")
-        when = datetime.strptime(row["acq_date"] + clock.zfill(4), "%Y-%m-%d%H%M").replace(tzinfo=timezone.utc)
-        measured = int(when.timestamp() * 1000)
-        if measured > now + FUTURE_MILLIS:
-            raise ValueError("NASA measurement is in the future")
-        latest = max(latest, measured)
-        if measured < now - WINDOW_MILLIS or power < MIN_FRP_MW or row["confidence"] == "l":
+        # Skip individual unusable NRT rows. Fail the refresh only when the source as
+        # a whole is missing, empty, or older than SOURCE_MAX_AGE_MILLIS.
+        parsed = parse_row(row, satellite_code, satellite_name, now)
+        if parsed is None:
             continue
-        records.append({
-            "lat": latitude, "lon": longitude, "time": measured, "frp": power,
-            "confidence": row["confidence"], "satellite": satellite_name,
-        })
+        measured, record = parsed
+        latest = max(latest, measured)
+        if record is not None:
+            records.append(record)
     if latest < now - SOURCE_MAX_AGE_MILLIS:
         raise ValueError("NASA satellite feed is empty or outdated")
     return records, latest
@@ -129,11 +171,19 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         raise ValueError("NASA redirect refused")
 
 
+def is_transient(error):
+    if isinstance(error, urllib.error.HTTPError):
+        return error.code in (408, 409, 425, 429, 500, 502, 503, 504)
+    if isinstance(error, urllib.error.URLError):
+        return True
+    return isinstance(error, (TimeoutError, socket.timeout, ConnectionError, http.client.IncompleteRead, OSError))
+
+
 def download(key, source):
     # Two UTC calendar days cover the rolling 24-hour interval; filter exact times in build().
     url = f"https://firms.modaps.eosdis.nasa.gov/api/area/csv/{key}/{source}/world/2"
     request = urllib.request.Request(url, headers={"Accept": "text/csv", "User-Agent": "PlanetaryLens-FireFeed/1.0"})
-    for attempt in range(3):
+    for attempt in range(MAX_DOWNLOAD_ATTEMPTS):
         try:
             with urllib.request.build_opener(NoRedirect).open(request, timeout=45) as response:
                 content = response.read(MAX_INPUT_BYTES + 1)
@@ -141,11 +191,7 @@ def download(key, source):
                 raise ValueError("NASA response exceeds input budget")
             return content
         except Exception as error:
-            transient = (
-                isinstance(error, urllib.error.HTTPError) and error.code in (429, 500, 502, 503, 504)
-            ) or (isinstance(error, (urllib.error.URLError, TimeoutError)) and
-                  not isinstance(error, urllib.error.HTTPError))
-            if transient and attempt < 2:
+            if is_transient(error) and attempt < MAX_DOWNLOAD_ATTEMPTS - 1:
                 time.sleep(2 ** (attempt + 1))
                 continue
             # Request URLs can contain the key. Forward only a fixed, known message.
@@ -158,6 +204,21 @@ def download(key, source):
             if isinstance(error, urllib.error.URLError):
                 raise ValueError(f"NASA connection failed for {source}") from None
             raise ValueError(f"NASA download failed for {source}") from None
+
+
+def download_all(key):
+    payloads = {}
+    errors = []
+    with ThreadPoolExecutor(max_workers=len(SOURCES)) as pool:
+        futures = {source: pool.submit(download, key, source) for source in SOURCES}
+        for source, future in futures.items():
+            try:
+                payloads[source] = future.result()
+            except Exception as error:
+                errors.append(error)
+    if errors:
+        raise errors[0]
+    return payloads
 
 
 def safe_failure_reason(error):
@@ -197,7 +258,7 @@ def main():
             key = os.environ.get("FIRMS_MAP_KEY", "").strip()
             if not re.fullmatch(r"[a-fA-F0-9]{32}", key):
                 raise ValueError("FIRMS_MAP_KEY is missing or invalid")
-            payloads = {source: download(key, source) for source in SOURCES}
+            payloads = download_all(key)
         content = build(payloads, int(time.time() * 1000))
         write_feed(args.output, content)
         document = json.loads(content)
