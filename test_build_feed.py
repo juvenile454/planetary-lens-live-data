@@ -21,7 +21,7 @@ def row(**changes):
         "satellite": "N20",
         "instrument": "VIIRS",
         "confidence": "n",
-        "frp": "50",
+        "frp": "150",
     } | changes
 
 
@@ -40,9 +40,9 @@ def all_payloads():
 class FeedTest(unittest.TestCase):
     def test_filters_on_job_before_output_and_keeps_exact_threshold(self):
         points, _ = feed.parse_csv(
-            payload(row(), row(frp="49.99"), row(confidence="l")), "VIIRS_NOAA20_NRT", NOW
+            payload(row(), row(frp="149.99"), row(confidence="l")), "VIIRS_NOAA20_NRT", NOW
         )
-        self.assertEqual([50.0], [point["frp"] for point in points])
+        self.assertEqual([150.0], [point["frp"] for point in points])
 
     def test_utc_window_and_midnight_time(self):
         points, latest = feed.parse_csv(
@@ -91,7 +91,7 @@ class FeedTest(unittest.TestCase):
             )
             for i in range(1200)
         ]
-        sparse = dict(lat=-40.0, lon=-100.0, time=NOW, frp=50.0, confidence="n", satellite="NOAA-21 VIIRS")
+        sparse = dict(lat=-40.0, lon=-100.0, time=NOW, frp=150.0, confidence="n", satellite="NOAA-21 VIIRS")
         selected, count = feed.select(dense + dense + [sparse])
         self.assertEqual(1201, count)
         self.assertEqual(feed.MAX_HOTSPOTS, len(selected))
@@ -140,20 +140,20 @@ class FeedTest(unittest.TestCase):
                 row(longitude="-190"),
                 row(frp="-1"),
                 row(frp="nan"),
-                row(confidence="nominal", frp="80", latitude="-40", longitude="170"),
+                row(confidence="nominal", frp="180", latitude="-40", longitude="170"),
                 row(acq_time="2460"),
                 row(satellite="N21"),
             ),
             "VIIRS_NOAA20_NRT",
             NOW,
         )
-        self.assertEqual([50.0, 80.0], [point["frp"] for point in points])
+        self.assertEqual([150.0, 180.0], [point["frp"] for point in points])
         self.assertEqual("n", points[1]["confidence"])
         self.assertEqual(-40.0, points[1]["lat"])
         self.assertEqual(NOW - 60 * 60 * 1000, latest)
 
     def test_dateline_longitude_is_wrapped_instead_of_failing_the_refresh(self):
-        points, _ = feed.parse_csv(payload(row(longitude="180.2", frp="60")), "VIIRS_NOAA20_NRT", NOW)
+        points, _ = feed.parse_csv(payload(row(longitude="180.2", frp="160")), "VIIRS_NOAA20_NRT", NOW)
         self.assertEqual(1, len(points))
         self.assertAlmostEqual(-179.8, points[0]["lon"], places=4)
 

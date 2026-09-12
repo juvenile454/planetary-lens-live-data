@@ -9,7 +9,7 @@ Scheduling can be delayed; every output carries its true generation time.
 ## Data contract
 
 - NASA FIRMS NOAA-20 and NOAA-21, worldwide, rolling 24 hours in UTC.
-- FRP **at least 50 MW**, nominal/high detection confidence.
+- FRP **at least 150 MW**, nominal/high detection confidence.
 - At most **400 detections and 256 KiB** after filtering on the job host.
 - Selection takes the strongest point from each occupied 30-degree cell in turns,
   preserving sparse regions before taking more detections from dense regions.

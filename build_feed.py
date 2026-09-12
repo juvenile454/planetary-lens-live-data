@@ -17,7 +17,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
-MIN_FRP_MW = 50.0
+MIN_FRP_MW = 150.0
 MAX_HOTSPOTS = 400
 MAX_OUTPUT_BYTES = 256 * 1024
 MAX_INPUT_BYTES = 20 * 1024 * 1024  # per satellite, on the job host only
