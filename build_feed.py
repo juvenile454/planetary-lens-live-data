@@ -27,6 +27,7 @@ WINDOW_MILLIS = 24 * 60 * 60 * 1000
 FUTURE_MILLIS = 5 * 60 * 1000
 SOURCE_MAX_AGE_MILLIS = 12 * 60 * 60 * 1000
 MAX_DOWNLOAD_ATTEMPTS = 5
+SOURCE_RETRY_DELAY_SECONDS = 30
 SOURCES = {
     "VIIRS_NOAA20_NRT": ("N20", "NOAA-20 VIIRS"),
     "VIIRS_NOAA21_NRT": ("N21", "NOAA-21 VIIRS"),
@@ -208,16 +209,27 @@ def download(key, source):
 
 def download_all(key):
     payloads = {}
-    errors = []
+    errors = {}
     with ThreadPoolExecutor(max_workers=len(SOURCES)) as pool:
         futures = {source: pool.submit(download, key, source) for source in SOURCES}
         for source, future in futures.items():
             try:
                 payloads[source] = future.result()
             except Exception as error:
-                errors.append(error)
+                errors[source] = error
     if errors:
-        raise errors[0]
+        # Keep the satellite that already arrived. NASA often drops only one
+        # of the two parallel worldwide CSV downloads; a short pause then a
+        # second pass recovers without discarding the successful payload.
+        time.sleep(SOURCE_RETRY_DELAY_SECONDS)
+        for source in list(errors):
+            try:
+                payloads[source] = download(key, source)
+                del errors[source]
+            except Exception as error:
+                errors[source] = error
+    if errors:
+        raise next(iter(errors.values()))
     return payloads
 
 

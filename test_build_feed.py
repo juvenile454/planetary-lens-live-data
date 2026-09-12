@@ -179,6 +179,25 @@ class FeedTest(unittest.TestCase):
                 feed.download(secret, "VIIRS_NOAA20_NRT")
         self.assertNotIn(secret, str(result.exception))
 
+    def test_download_all_retries_only_the_failed_source(self):
+        secret = "a" * 32
+        n20, n21 = b"n20-csv", b"n21-csv"
+        state = {"n20": 0}
+
+        def fake_download(_key, source):
+            if source == "VIIRS_NOAA20_NRT":
+                state["n20"] += 1
+                if state["n20"] == 1:
+                    raise ValueError("NASA connection failed for VIIRS_NOAA20_NRT")
+                return n20
+            return n21
+
+        with patch.object(feed, "download", side_effect=fake_download), patch("time.sleep") as slept:
+            payloads = feed.download_all(secret)
+        self.assertEqual({"VIIRS_NOAA20_NRT": n20, "VIIRS_NOAA21_NRT": n21}, payloads)
+        self.assertEqual(2, state["n20"])
+        slept.assert_called_once_with(feed.SOURCE_RETRY_DELAY_SECONDS)
+
 
 if __name__ == "__main__":
     unittest.main()
