@@ -10,25 +10,48 @@ on:
     branches: [main]
     paths:
       - build_feed.py
-      - test_build_feed.py
+      - test_*.py
+      - .github/workflows/update-fire-feed.yml
+  pull_request:
+    paths:
+      - build_feed.py
+      - test_*.py
       - .github/workflows/update-fire-feed.yml
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
-  group: fire-feed
+  group: fire-feed-${{ github.event_name == 'pull_request' && github.ref || 'publisher' }}
   cancel-in-progress: false
 
 jobs:
-  refresh:
-    runs-on: ubuntu-latest
-    timeout-minutes: 12
+  test:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Verify filtering and failure handling
-        run: python3 -m unittest -v test_build_feed.py
+        with:
+          persist-credentials: false
+      - name: Verify filtering, real transport deadlines and failure handling (no NASA access)
+        run: python3 -m unittest discover -v
+
+  refresh:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Queued events can point at an old data commit. Always start from main.
+          ref: main
+      - name: Verify filtering, real transport deadlines and failure handling
+        run: python3 -m unittest discover -v
       - name: Build the bounded global feed
+        timeout-minutes: 7
         env:
           FIRMS_MAP_KEY: ${{ secrets.FIRMS_MAP_KEY }}
         run: python3 build_feed.py
@@ -39,4 +62,7 @@ jobs:
           git add data/fire-hotspots.json
           if git diff --cached --quiet; then exit 0; fi
           git commit -m 'Refresh filtered world fire hotspots'
+          # Never force-push or overwrite a concurrent source/data change.
           git push origin HEAD:main
+          git fetch origin main
+          test "$(git rev-parse HEAD:data/fire-hotspots.json)" = "$(git rev-parse origin/main:data/fire-hotspots.json)"
