@@ -3,17 +3,15 @@
 
 import argparse
 import csv
-import http.client
 import io
 import json
 import math
 import os
 import re
-import socket
+import subprocess
 import sys
+import tempfile
 import time
-import urllib.error
-import urllib.request
 from collections import defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -26,8 +24,16 @@ MAX_INPUT_BYTES = 20 * 1024 * 1024  # per satellite, on the job host only
 WINDOW_MILLIS = 24 * 60 * 60 * 1000
 FUTURE_MILLIS = 5 * 60 * 1000
 SOURCE_MAX_AGE_MILLIS = 12 * 60 * 60 * 1000
-MAX_DOWNLOAD_ATTEMPTS = 5
+MAX_DOWNLOAD_ATTEMPTS = 3
+CONNECT_TIMEOUT_SECONDS = 10
+DOWNLOAD_TIMEOUT_SECONDS = 45
+PROCESS_TIMEOUT_SECONDS = 50
 SOURCE_RETRY_DELAY_SECONDS = 30
+NASA_BASE_URL = "https://firms.modaps.eosdis.nasa.gov"
+TRANSIENT_HTTP_STATUS = {408, 409, 425, 429, 500, 502, 503, 504}
+# DNS/connect, partial transfers, timeout, empty reply, send/receive, HTTP/2/3.
+# TLS certificate errors, redirects, credentials and size limits are NOT transient.
+TRANSIENT_CURL_CODES = {5, 6, 7, 16, 18, 28, 52, 55, 56, 92, 95, 96}
 SOURCES = {
     "VIIRS_NOAA20_NRT": ("N20", "NOAA-20 VIIRS"),
     "VIIRS_NOAA21_NRT": ("N21", "NOAA-21 VIIRS"),
@@ -71,9 +77,9 @@ def parse_row(row, satellite_code, satellite_name, now):
     if not re.fullmatch(r"\d{1,4}", clock):
         return None
     try:
-        when = datetime.strptime(
-            str(row.get("acq_date", "")) + clock.zfill(4), "%Y-%m-%d%H%M"
-        ).replace(tzinfo=timezone.utc)
+        when = datetime.strptime(str(row.get("acq_date", "")) + clock.zfill(4), "%Y-%m-%d%H%M").replace(
+            tzinfo=timezone.utc
+        )
     except ValueError:
         return None
     measured = int(when.timestamp() * 1000)
@@ -82,8 +88,12 @@ def parse_row(row, satellite_code, satellite_name, now):
     record = None
     if not (measured < now - WINDOW_MILLIS or power < MIN_FRP_MW or confidence == "l"):
         record = {
-            "lat": latitude, "lon": longitude, "time": measured, "frp": power,
-            "confidence": confidence, "satellite": satellite_name,
+            "lat": latitude,
+            "lon": longitude,
+            "time": measured,
+            "frp": power,
+            "confidence": confidence,
+            "satellite": satellite_name,
         }
     return measured, record
 
@@ -167,85 +177,148 @@ def build(payloads, now):
     return content
 
 
-class NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        raise ValueError("NASA redirect refused")
+class DownloadError(ValueError):
+    def __init__(self, source, category, retryable=False):
+        super().__init__(f"NASA {category} for {source}")
+        self.retryable = retryable
 
 
-def is_transient(error):
-    if isinstance(error, urllib.error.HTTPError):
-        return error.code in (408, 409, 425, 429, 500, 502, 503, 504)
-    if isinstance(error, urllib.error.URLError):
-        return True
-    return isinstance(error, (TimeoutError, socket.timeout, ConnectionError, http.client.IncompleteRead, OSError))
+def download_once(key, source):
+    # urllib's socket timeout is NOT a wall-clock transfer deadline. A trickling
+    # response or repeated connection attempts used to consume the entire CI job.
+    # curl bounds connection AND total transfer; the subprocess is a final guard.
+    if source not in SOURCES or not re.fullmatch(r"[a-fA-F0-9]{32}", key):
+        raise ValueError("FIRMS_MAP_KEY is missing or invalid")
+    url = f"{NASA_BASE_URL}/api/area/csv/{key}/{source}/world/2"
+    with tempfile.TemporaryDirectory(prefix="planetarylens-fire-") as directory:
+        output = Path(directory) / "response.csv"
+        command = [
+            "curl",
+            "--disable",
+            "--silent",
+            "--fail",
+            "--proto",
+            "=https",
+            "--connect-timeout",
+            str(CONNECT_TIMEOUT_SECONDS),
+            "--max-time",
+            str(DOWNLOAD_TIMEOUT_SECONDS),
+            "--max-filesize",
+            str(MAX_INPUT_BYTES),
+            "--header",
+            "Accept: text/csv",
+            "--user-agent",
+            "PlanetaryLens-FireFeed/1.0",
+            "--output",
+            str(output),
+            "--write-out",
+            "%{http_code}",
+            "--config",
+            "-",
+        ]
+        try:
+            # The credential-bearing URL is passed over stdin, never argv or logs.
+            # No --location: a redirect must never forward the NASA credential.
+            result = subprocess.run(
+                command,
+                input=f'url = "{url}"\n',
+                capture_output=True,
+                text=True,
+                timeout=PROCESS_TIMEOUT_SECONDS,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            raise DownloadError(source, "process deadline exceeded", True) from None
+        except OSError:
+            raise DownloadError(source, "transport unavailable") from None
+        status_text = result.stdout.strip()
+        status = int(status_text) if re.fullmatch(r"[0-9]{3}", status_text) else 0
+        if status >= 300:
+            raise DownloadError(source, f"HTTP {status}", status in TRANSIENT_HTTP_STATUS)
+        if result.returncode:
+            raise DownloadError(
+                source, f"transport code {result.returncode}", result.returncode in TRANSIENT_CURL_CODES
+            )
+        if status != 200:
+            raise DownloadError(source, "unexpected HTTP response")
+        with output.open("rb") as response:
+            content = response.read(MAX_INPUT_BYTES + 1)
+        if len(content) > MAX_INPUT_BYTES:
+            raise ValueError("NASA response exceeds input budget")
+        return content
 
 
 def download(key, source):
-    # Two UTC calendar days cover the rolling 24-hour interval; filter exact times in build().
-    url = f"https://firms.modaps.eosdis.nasa.gov/api/area/csv/{key}/{source}/world/2"
-    request = urllib.request.Request(url, headers={"Accept": "text/csv", "User-Agent": "PlanetaryLens-FireFeed/1.0"})
     for attempt in range(MAX_DOWNLOAD_ATTEMPTS):
+        started = time.monotonic()
         try:
-            with urllib.request.build_opener(NoRedirect).open(request, timeout=45) as response:
-                content = response.read(MAX_INPUT_BYTES + 1)
-            if len(content) > MAX_INPUT_BYTES:
-                raise ValueError("NASA response exceeds input budget")
+            content = download_once(key, source)
+            print(
+                f"NASA {source}: received {len(content)} bytes in {time.monotonic() - started:.1f}s",
+                flush=True,
+            )
             return content
-        except Exception as error:
-            if is_transient(error) and attempt < MAX_DOWNLOAD_ATTEMPTS - 1:
-                time.sleep(2 ** (attempt + 1))
-                continue
-            # Request URLs can contain the key. Forward only a fixed, known message.
-            if isinstance(error, TimeoutError) or (
-                isinstance(error, urllib.error.URLError) and isinstance(error.reason, TimeoutError)
-            ):
-                raise ValueError(f"NASA download timed out for {source}") from None
-            if isinstance(error, urllib.error.HTTPError):
-                raise ValueError(f"NASA HTTP request failed for {source}") from None
-            if isinstance(error, urllib.error.URLError):
-                raise ValueError(f"NASA connection failed for {source}") from None
-            raise ValueError(f"NASA download failed for {source}") from None
+        except DownloadError as error:
+            print(
+                f"Attempt {attempt + 1}/{MAX_DOWNLOAD_ATTEMPTS}: {safe_failure_reason(error)} "
+                f"({time.monotonic() - started:.1f}s)",
+                file=sys.stderr,
+                flush=True,
+            )
+            if not error.retryable or attempt == MAX_DOWNLOAD_ATTEMPTS - 1:
+                raise
+            time.sleep(2 ** (attempt + 1))
 
 
 def download_all(key):
-    payloads = {}
-    errors = {}
-    with ThreadPoolExecutor(max_workers=len(SOURCES)) as pool:
-        futures = {source: pool.submit(download, key, source) for source in SOURCES}
-        for source, future in futures.items():
-            try:
-                payloads[source] = future.result()
-            except Exception as error:
-                errors[source] = error
-    if errors:
-        # Keep the satellite that already arrived. NASA often drops only one
-        # of the two parallel worldwide CSV downloads; a short pause then a
-        # second pass recovers without discarding the successful payload.
-        time.sleep(SOURCE_RETRY_DELAY_SECONDS)
-        for source in list(errors):
-            try:
-                payloads[source] = download(key, source)
-                del errors[source]
-            except Exception as error:
-                errors[source] = error
-    if errors:
-        raise next(iter(errors.values()))
-    return payloads
+    payloads, errors = {}, {}
+    pending = list(SOURCES)
+    for round_index in range(2):
+        if round_index:
+            print("NASA temporary failure: retrying only missing satellites after cooldown", flush=True)
+            time.sleep(SOURCE_RETRY_DELAY_SECONDS)
+        # Both rounds MUST be parallel. Serial retries could exceed the
+        # 12-minute job budget when both satellites failed.
+        with ThreadPoolExecutor(max_workers=len(SOURCES)) as pool:
+            futures = {source: pool.submit(download, key, source) for source in pending}
+            for source, future in futures.items():
+                try:
+                    payloads[source] = future.result()
+                    errors.pop(source, None)
+                except Exception as error:
+                    errors[source] = error
+        if not errors:
+            return payloads
+        # Never retry permanent failures in the outer round (including HTTP 403).
+        permanent = [
+            error for error in errors.values() if not isinstance(error, DownloadError) or not error.retryable
+        ]
+        if permanent:
+            raise permanent[0]
+        pending = list(errors)
+    raise next(iter(errors.values()))
 
 
 def safe_failure_reason(error):
     # Never print arbitrary upstream exceptions: float/date parsing and network errors may
     # contain untrusted input or a credential-bearing URL. Only our fixed diagnostics qualify.
     allowed = {
-        "NASA response exceeds input budget", "NASA CSV schema missing", "Non-finite NASA measurement",
-        "Invalid NASA measurement", "Unexpected NASA sensor", "Unexpected NASA confidence",
-        "Invalid NASA acquisition time", "NASA measurement is in the future",
-        "NASA satellite feed is empty or outdated", "Both global satellite feeds are required",
-        "Filtered feed exceeds mobile budget", "FIRMS_MAP_KEY is missing or invalid",
+        "NASA response exceeds input budget",
+        "NASA CSV schema missing",
+        "NASA satellite feed is empty or outdated",
+        "Both global satellite feeds are required",
+        "Filtered feed exceeds mobile budget",
+        "FIRMS_MAP_KEY is missing or invalid",
     } | {
-        f"NASA {reason} for {source}"
+        f"NASA {category} for {source}"
         for source in SOURCES
-        for reason in ("download failed", "download timed out", "HTTP request failed", "connection failed")
+        for category in (
+            "process deadline exceeded",
+            "transport unavailable",
+            "unexpected HTTP response",
+            *(f"HTTP {status}" for status in range(300, 600)),
+            *(f"transport code {code}" for code in range(1, 100)),
+        )
     }
     reason = str(error)
     return reason if reason in allowed else "Unexpected input or processing error"
@@ -274,10 +347,14 @@ def main():
         content = build(payloads, int(time.time() * 1000))
         write_feed(args.output, content)
         document = json.loads(content)
-        print(f"Published selection: {len(document['hotspots'])} / {document['candidateCount']} detections, {len(content)} bytes")
+        print(
+            f"Built selection: {len(document['hotspots'])} / {document['candidateCount']} detections, {len(content)} bytes"
+        )
     except Exception as error:
         # No raw upstream payload, secret, URL, or traceback in public workflow logs.
-        print(f"Feed refresh failed: {safe_failure_reason(error)}; previous output retained.", file=sys.stderr)
+        print(
+            f"Feed refresh failed: {safe_failure_reason(error)}; previous output retained.", file=sys.stderr
+        )
         return 1
     return 0
 
