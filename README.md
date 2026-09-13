@@ -52,8 +52,9 @@ on November 1, 2026. NOAA-20 and NOAA-21 provide the global inputs used here.
 
 ## Reliability and diagnostics
 
-- Each request has a 10-second connection limit, a **45-second total transfer limit**,
-  and a 50-second subprocess guard that kills and reaps a stuck curl process.
+- Each request uses IPv4 and HTTP/1.1 (Azure GitHub runners often hang on IPv6 or
+  HTTP/2 to FIRMS), a **20-second connection limit**, a **45-second total transfer
+  limit**, and a 50-second subprocess guard that kills and reaps a stuck curl process.
   Unlike a socket inactivity timeout, these limits also stop slowly trickling responses.
 - Each satellite gets three attempts (2/4-second backoff). After exhaustion of a
   temporary failure, wait 30 seconds and retry **only** the missing satellite(s).
@@ -88,9 +89,10 @@ limits. GitHub's raw CDN can briefly serve a previous version; a green run alone
 is not proof that devices see the new blob. Compare against the exact main
 Contents API response, not a fabricated timestamp or a modified app URL.
 
-If NASA remains unavailable after the bounded attempts, the run must be red and
-the last valid file remains. Do not hide the outage with `continue-on-error`, a
-partial satellite feed or a rewritten timestamp. Diagnose the logged status/code;
+If NASA remains unavailable after the bounded attempts on two runners, the run
+must be red and the last valid file remains. A failed fetch may retry once on a
+new runner; that is not a hidden success. Do not ignore both failures, publish a
+partial satellite feed or rewrite a timestamp. Diagnose the logged status/code;
 a 401/403 needs a key/access check, while TLS errors must never be bypassed.
 
 The 15-minute GitHub schedule is best-effort and can be delayed by hours. The
