@@ -43,6 +43,8 @@ jobs:
     timeout-minutes: 12
     permissions:
       contents: write
+    outputs:
+      feed: ${{ steps.build.outcome }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -51,11 +53,14 @@ jobs:
       - name: Verify filtering, real transport deadlines and failure handling
         run: python3 -m unittest discover -v
       - name: Build the bounded global feed
+        id: build
         timeout-minutes: 7
+        continue-on-error: true
         env:
           FIRMS_MAP_KEY: ${{ secrets.FIRMS_MAP_KEY }}
         run: python3 build_feed.py
       - name: Publish successful refresh
+        if: steps.build.outcome == 'success'
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
@@ -66,3 +71,56 @@ jobs:
           git push origin HEAD:main
           git fetch origin main
           test "$(git rev-parse HEAD:data/fire-hotspots.json)" = "$(git rev-parse origin/main:data/fire-hotspots.json)"
+
+  refresh-retry:
+    needs: refresh
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && needs.refresh.outputs.feed == 'failure'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      feed: ${{ steps.build.outcome }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+      - name: Retry the bounded global feed on a new runner
+        id: build
+        timeout-minutes: 7
+        continue-on-error: true
+        env:
+          FIRMS_MAP_KEY: ${{ secrets.FIRMS_MAP_KEY }}
+        run: python3 build_feed.py
+      - name: Publish successful refresh
+        if: steps.build.outcome == 'success'
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add data/fire-hotspots.json
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m 'Refresh filtered world fire hotspots'
+          git push origin HEAD:main
+          git fetch origin main
+          test "$(git rev-parse HEAD:data/fire-hotspots.json)" = "$(git rev-parse origin/main:data/fire-hotspots.json)"
+
+  refresh-result:
+    needs: [refresh, refresh-retry]
+    if: always() && !cancelled() && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Fail only when NASA was not fetched
+        run: |
+          first_job='${{ needs.refresh.result }}'
+          first_feed='${{ needs.refresh.outputs.feed }}'
+          retry_job='${{ needs.refresh-retry.result }}'
+          retry_feed='${{ needs.refresh-retry.outputs.feed }}'
+          if [ "$first_job" = "success" ] && [ "$first_feed" = "success" ]; then
+            exit 0
+          fi
+          if [ "$retry_job" = "success" ] && [ "$retry_feed" = "success" ]; then
+            exit 0
+          fi
+          echo "Feed refresh failed on both runners."
+          exit 1

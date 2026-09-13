@@ -25,7 +25,7 @@ WINDOW_MILLIS = 24 * 60 * 60 * 1000
 FUTURE_MILLIS = 5 * 60 * 1000
 SOURCE_MAX_AGE_MILLIS = 12 * 60 * 60 * 1000
 MAX_DOWNLOAD_ATTEMPTS = 3
-CONNECT_TIMEOUT_SECONDS = 10
+CONNECT_TIMEOUT_SECONDS = 20
 DOWNLOAD_TIMEOUT_SECONDS = 45
 PROCESS_TIMEOUT_SECONDS = 50
 SOURCE_RETRY_DELAY_SECONDS = 30
@@ -197,6 +197,10 @@ def download_once(key, source):
             "--disable",
             "--silent",
             "--fail",
+            # Azure GitHub runners often have broken IPv6 or HTTP/2 to FIRMS.
+            # Either hang consumes the whole connect budget as curl error 28.
+            "--ipv4",
+            "--http1.1",
             "--proto",
             "=https",
             "--connect-timeout",

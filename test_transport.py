@@ -90,6 +90,14 @@ class RetryTest(unittest.TestCase):
             args, kwargs = run.call_args
             self.assertNotIn(KEY, repr(args))
             self.assertNotIn(feed.NASA_BASE_URL, repr(args))
+            self.assertIn("--ipv4", args[0])
+            self.assertIn("--http1.1", args[0])
+            self.assertEqual(
+                str(feed.CONNECT_TIMEOUT_SECONDS),
+                args[0][args[0].index("--connect-timeout") + 1],
+            )
+            self.assertLess(feed.CONNECT_TIMEOUT_SECONDS, feed.DOWNLOAD_TIMEOUT_SECONDS)
+            self.assertLess(feed.DOWNLOAD_TIMEOUT_SECONDS, feed.PROCESS_TIMEOUT_SECONDS)
             self.assertIn(KEY, kwargs["input"])
             self.assertEqual(feed.PROCESS_TIMEOUT_SECONDS, kwargs["timeout"])
             self.assertNotIn(KEY, str(caught.exception))
