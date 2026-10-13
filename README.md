@@ -1,102 +1,94 @@
 # PlanetaryLens world fire feed
 
-Small, public NASA FIRMS VIIRS selection for PlanetaryLens. No Android application source,
-NASA key, or raw downloads are published here. `build_feed.py` uses Python 3.10+
-and curl 8.4+ (both supplied by the Ubuntu 24.04 runner). It is scheduled in
-GitHub Actions at minutes 7, 22, 37 and 52 of each hour.
-Scheduling can be delayed; every output carries its true generation time.
+Bounded public NASA LANCE FIRMS selection for PlanetaryLens. Python 3.10+,
+curl 8.4+ and OpenSSL are supplied by the Ubuntu 24.04 Actions runner.
+NASA credentials and raw CSV stay on the publisher host, never in Android or
+public JSON. The existing repository Actions secret `FIRMS_MAP_KEY` is used.
 
-## Data contract
+## Versioned outputs
 
-- NASA FIRMS NOAA-20 and NOAA-21, worldwide, rolling 24 hours in UTC.
-- FRP **at least 150 MW**, nominal/high detection confidence.
-- At most **400 detections and 256 KiB** after filtering on the job host.
-- Selection takes the strongest point from each occupied 30-degree cell in turns,
-  preserving sparse regions before taking more detections from dense regions.
-- Individual unusable NRT rows are skipped. An unavailable, schema-invalid, empty
-  or outdated satellite source still fails the whole refresh. The previous
-  published file is retained; the app refuses feeds older than 3 hours.
-- These are sampled thermal detections, not confirmed wildfires, perimeters or warnings.
+- `data/fire-hotspots.json`: Schema 1, strict fresh NOAA-20 **and** NOAA-21 VIIRS.
+- `data/fire-hotspots-v2.json`: Schema 2, explicit source health and selected mode.
 
-## Access and operation
+The publisher fetches three fixed Area-API `world/2` products in parallel:
+`VIIRS_NOAA20_NRT`, `VIIRS_NOAA21_NRT`, `MODIS_NRT`. MODIS Terra (`T`) and Aqua
+(`A`) are assessed independently, requiring actual `instrument = MODIS` and
+`version = 6.1NRT`; missing fields and RT/URT never establish NRT freshness.
 
-Set the repository Actions secret `FIRMS_MAP_KEY`, then run **Update world fire feed**.
-The job downloads two UTC calendar days per satellite on the runner, filters the
-exact last 24 hours, and publishes only `data/fire-hotspots.json`. A NASA key is
-never needed by the Android app. No unfiltered world data is sent to the phone.
+Deterministic priority (no sensor mixing):
 
-Run tests with `python3 -m unittest discover -v` (requires curl and OpenSSL;
-all transport tests use an ephemeral loopback HTTPS server, never NASA). Run a local refresh with
-`FIRMS_MAP_KEY` in the process environment and `python3 build_feed.py`.
-`--input-dir` accepts a directory with the two named NASA CSV files for offline
-verification. Raw CSV files and credentials must stay outside this repository.
+1. Both VIIRS sources fresh: `primary_viirs`, renew V1 and V2.
+2. Otherwise any MODIS platform fresh: `fallback_modis`, select all fresh MODIS
+   platforms, renew V2 only; V1 bytes and generation time remain unchanged.
+3. Otherwise one VIIRS source fresh: `partial_viirs`, renew V2 only.
+4. No fresh approved source: fail and retain both previous outputs.
 
-The source of this publisher is maintained in the private app checkout under
-`services/fire-feed/`. Copy the Python files and this README to the data repository;
-copy `workflow.yml` to `.github/workflows/update-fire-feed.yml`.
+V2 lists exactly four fixed profiles with product, satellite, instrument,
+`fresh`/`stale`/`unavailable`/`invalid`, measurement time and explicit selection.
+Selected source timestamps and every point's source metadata must agree.
+Degraded success emits an Actions warning and summary; it is not primary health.
+
+## Selection and freshness
+
+- Rolling 24-hour UTC observations, at most 5 minutes in the future; raw source
+  maxima must be within 12 hours, evaluated before confidence/FRP filtering.
+- FRP >=150 MW; VIIRS nominal/high confidence. MODIS confidence must be finite
+  0..100; selection >=30, with retained `confidencePercent`. Mapping 30..<80 to
+  nominal and 80..100 to high is a PlanetaryLens selection convention, not a NASA
+  probability or asserted class boundary.
+- At most 400 points and 256 KiB; deterministic deduplication and round-robin
+  selection across occupied 30-degree cells preserve sparse regions.
+- Thermal observations, not confirmed wildfires, perimeters, warnings or proof
+  that empty areas are fire-free. MODIS 1000 m pixels are not VIIRS 375 m pixels.
+- Generation, source and observation timestamps remain distinct. Consumers must
+  enforce <=3-hour feed age and <=12-hour active source age at fetch.
+
+## Operation and verification
+
+`.github/workflows/update-fire-feed.yml` preserves best-effort scheduling at
+minutes 7/22/37/52, read-only offline PR tests, main-only publication and at most
+one second-runner retry on total build failure. Explicitly dispatch on `main`;
+check queued/running jobs first. Normal fast-forward push only, followed by exact
+remote blob checks for existing outputs. No force-push or timestamp washing.
+
+Requests use validated fixed HTTPS hosts/products, no redirects, IPv4/HTTP1.1,
+20-second connect, 45-second transfer and 50-second process limits, 20 MiB per
+product. Three attempts with 2/4-second backoff; after 30 seconds, retry only
+temporary failures. Both rounds are parallel (342-second worst-case transport).
+Permanent HTTP/TLS/auth errors do not retry. Logs never expose keys, key-bearing
+URLs, raw CSV or curl stderr. Both intended documents are validated before any
+writes; outputs are independent atomic replacements.
+
+Offline tests: `python3 -m unittest discover -v`. Loopback HTTPS and synthetic
+fixtures only, no NASA access. `--input-dir` supports bounded offline input using
+the three exact product names plus `.csv`; keep genuine raw inputs outside this
+repository. Private app publisher source is maintained under `services/fire-feed/`.
+
+Read back both exact main blobs and public URLs; green CI alone is insufficient:
+
+- https://raw.githubusercontent.com/juvenile454/planetary-lens-live-data/main/data/fire-hotspots-v2.json
+- https://raw.githubusercontent.com/juvenile454/planetary-lens-live-data/main/data/fire-hotspots.json
+
+Validate public bytes, generation/source ages, mode and selection limits. On a
+degraded publication compare V1 against its pre-run hash; stale V1 is expected.
+The external watchdog is not changed here: monitoring must separately recognize
+usable degraded V2, primary-pair health and stale V1. GitHub schedules may drift.
 
 ## Attribution and rights
 
-NASA FIRMS / LANCE, NASA and NOAA. VIIRS 375 m active fire products:
-[NASA API documentation](https://firms.modaps.eosdis.nasa.gov/api/area/),
-[FIRMS map](https://firms.modaps.eosdis.nasa.gov/map/),
-[NASA data use and citation guidance](https://www.earthdata.nasa.gov/engage/open-data-services-software/data-use-policy).
-NASA Earth science data may be reused and redistributed under the cited policy.
-No NASA logo, satellite imagery, third-party map tiles or private user data are included.
+NASA LANCE FIRMS; PlanetaryLens filtering/JSON preparation. No NASA endorsement,
+logos, imagery, third-party tiles or user data. NASA mission data is unrestricted
+under the cited guidance (CC0); API access rules and LANCE limitations still apply.
 
-NOAA-20 product: https://doi.org/10.5067/FIRMS/VIIRS/VJ114IMGT_NRT.002
-NOAA-21 product: https://doi.org/10.5067/VIIRS/VJ214IMGTDL_NRT.002
+- https://www.earthdata.nasa.gov/learn/use-data/data-citations-acknowledgements
+- https://www.earthdata.nasa.gov/data/projects/lance/disclaimer
+- https://www.earthdata.nasa.gov/data/catalog/lancemodis-mcd14dl-6.1nrt
+- NOAA-20: https://doi.org/10.5067/FIRMS/VIIRS/VJ114IMGT_NRT.002
+- NOAA-21: https://doi.org/10.5067/VIIRS/VJ214IMGTDL_NRT.002
+- MODIS: https://doi.org/10.5067/FIRMS/MODIS/MCD14DL.NRT.0061
+- https://firms.modaps.eosdis.nasa.gov/api/area/
+- https://firms.modaps.eosdis.nasa.gov/map/
 
-S-NPP is not a required source because NASA announced the end of its product delivery
-on November 1, 2026. NOAA-20 and NOAA-21 provide the global inputs used here.
-
-## Reliability and diagnostics
-
-- Each request uses IPv4 and HTTP/1.1 (Azure GitHub runners often hang on IPv6 or
-  HTTP/2 to FIRMS), a **20-second connection limit**, a **45-second total transfer
-  limit**, and a 50-second subprocess guard that kills and reaps a stuck curl process.
-  Unlike a socket inactivity timeout, these limits also stop slowly trickling responses.
-- Each satellite gets three attempts (2/4-second backoff). After exhaustion of a
-  temporary failure, wait 30 seconds and retry **only** the missing satellite(s).
-  Both rounds run in parallel: the worst-case transport budget is 342 seconds,
-  not multiplied by the number of satellites. The build step has a 7-minute guard;
-  the job retains its 12-minute limit with headroom for tests and publication.
-- HTTP 408/409/425/429/500/502/503/504, DNS/connect errors, incomplete transfers
-  and transient transport failures can retry. HTTP 401/403, redirects, TLS trust
-  failures, oversize input and missing tools fail without an outer retry.
-- curl configuration is disabled; the key-bearing URL goes over stdin, never the
-  command line. HTTPS certificate validation stays enabled; redirects are not followed.
-  Temporary raw files are private to an attempt and cleaned on success/failure.
-- Logs contain only fixed source names, HTTP status/curl code, duration and byte
-  counts. Common curl codes: 6 DNS, 7 connect, 18 truncated response, 28 timeout,
-  56 receive/reset, 60 TLS certificate, 63 size budget. Never add raw stderr,
-  upstream response bodies, request URLs, secrets or curl verbose tracing to logs.
-- Failed transport/schema/freshness validation never changes the public output or
-  renews its timestamp. Both satellites must still be fresh within 12 hours.
-- Pull requests run the offline regression suite with read-only permissions and
-  no NASA secret. Only main can publish; queued jobs check out current main.
-  Publishing is a normal fast-forward push followed by an exact remote blob check.
-  A concurrent edit that prevents a fast-forward fails safely: rerun on current
-  main after reviewing the edit; never force-push a stale feed over it.
-
-### Verification and incident handling
-
-After a change, run the full Python suite, then the Actions workflow on main.
-Verify both the run's publication step and the JSON at the **actual app URL**:
-`https://raw.githubusercontent.com/juvenile454/planetary-lens-live-data/main/data/fire-hotspots.json`.
-Check generation time, both `sourceLatestMillis` values, filters and size/count
-limits. GitHub's raw CDN can briefly serve a previous version; a green run alone
-is not proof that devices see the new blob. Compare against the exact main
-Contents API response, not a fabricated timestamp or a modified app URL.
-
-If NASA remains unavailable after the bounded attempts on two runners, the run
-must be red and the last valid file remains. A failed fetch may retry once on a
-new runner; that is not a hidden success. Do not ignore both failures, publish a
-partial satellite feed or rewrite a timestamp. Diagnose the logged status/code;
-a 401/403 needs a key/access check, while TLS errors must never be bypassed.
-
-The 15-minute GitHub schedule is best-effort and can be delayed by hours. The
-existing external freshness watchdog dispatches main when the published feed is
-older than 25 minutes and alerts from 90 minutes. It must remain independent of
-this workflow. Scheduling/hosting and sustained NASA outages cannot be guaranteed
-away by retries; production still needs independent freshness monitoring.
+MODIS is a conditional short-term path within the same FIRMS failure domain,
+not a durable independent backup; recheck Terra/Aqua retirement and API status.
+S-NPP is not an input.

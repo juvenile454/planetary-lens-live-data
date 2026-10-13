@@ -11,11 +11,13 @@ on:
     paths:
       - build_feed.py
       - test_*.py
+      - fixtures/**
       - .github/workflows/update-fire-feed.yml
   pull_request:
     paths:
       - build_feed.py
       - test_*.py
+      - fixtures/**
       - .github/workflows/update-fire-feed.yml
 
 permissions:
@@ -58,19 +60,26 @@ jobs:
         continue-on-error: true
         env:
           FIRMS_MAP_KEY: ${{ secrets.FIRMS_MAP_KEY }}
-        run: python3 build_feed.py
+        run: python3 build_feed.py --output data/fire-hotspots.json --output-v2 data/fire-hotspots-v2.json
       - name: Publish successful refresh
         if: steps.build.outcome == 'success'
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add data/fire-hotspots.json
+          # Fallback may create V2 before any valid V1 exists. Never stage a missing V1.
+          for path in data/fire-hotspots.json data/fire-hotspots-v2.json; do
+            if [ -f "$path" ]; then git add "$path"; fi
+          done
           if git diff --cached --quiet; then exit 0; fi
           git commit -m 'Refresh filtered world fire hotspots'
           # Never force-push or overwrite a concurrent source/data change.
           git push origin HEAD:main
           git fetch origin main
-          test "$(git rev-parse HEAD:data/fire-hotspots.json)" = "$(git rev-parse origin/main:data/fire-hotspots.json)"
+          for path in data/fire-hotspots.json data/fire-hotspots-v2.json; do
+            if [ -f "$path" ]; then
+              test "$(git rev-parse "HEAD:$path")" = "$(git rev-parse "origin/main:$path")"
+            fi
+          done
 
   refresh-retry:
     needs: refresh
@@ -91,18 +100,25 @@ jobs:
         continue-on-error: true
         env:
           FIRMS_MAP_KEY: ${{ secrets.FIRMS_MAP_KEY }}
-        run: python3 build_feed.py
+        run: python3 build_feed.py --output data/fire-hotspots.json --output-v2 data/fire-hotspots-v2.json
       - name: Publish successful refresh
         if: steps.build.outcome == 'success'
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add data/fire-hotspots.json
+          # Fallback may create V2 before any valid V1 exists. Never stage a missing V1.
+          for path in data/fire-hotspots.json data/fire-hotspots-v2.json; do
+            if [ -f "$path" ]; then git add "$path"; fi
+          done
           if git diff --cached --quiet; then exit 0; fi
           git commit -m 'Refresh filtered world fire hotspots'
           git push origin HEAD:main
           git fetch origin main
-          test "$(git rev-parse HEAD:data/fire-hotspots.json)" = "$(git rev-parse origin/main:data/fire-hotspots.json)"
+          for path in data/fire-hotspots.json data/fire-hotspots-v2.json; do
+            if [ -f "$path" ]; then
+              test "$(git rev-parse "HEAD:$path")" = "$(git rev-parse "origin/main:$path")"
+            fi
+          done
 
   refresh-result:
     needs: [refresh, refresh-retry]
@@ -110,7 +126,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:
-      - name: Fail only when NASA was not fetched
+      - name: Require a successfully published usable V2 feed
         run: |
           first_job='${{ needs.refresh.result }}'
           first_feed='${{ needs.refresh.outputs.feed }}'

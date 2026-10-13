@@ -111,23 +111,22 @@ class RetryTest(unittest.TestCase):
             run.assert_not_called()
 
     def test_cli_retains_previous_output_on_transport_and_validation_failure(self):
-        invalid = all_payloads() | {SOURCE: b"<html>upstream unavailable</html>"}
-        stale = all_payloads()
-        stale[SOURCE] = stale[SOURCE].replace(b"2026-09-06", b"2026-09-04")
+        invalid = {source: b"<html>upstream unavailable</html>" for source in feed.SOURCES}
+        stale = {source: value.replace(b"2026-09-06", b"2026-09-04") for source, value in all_payloads().items()}
         for response in (feed.DownloadError(SOURCE, "transport code 28", True), invalid, stale):
             with self.subTest(response=type(response).__name__), tempfile.TemporaryDirectory() as directory:
                 output = Path(directory) / "feed.json"
                 output.write_bytes(b"previous output")
                 download = (
-                    patch.object(feed, "download_all", side_effect=response)
+                    patch.object(feed, "download_results", side_effect=response)
                     if isinstance(response, Exception)
-                    else patch.object(feed, "download_all", return_value=response)
+                    else patch.object(feed, "download_results", return_value=(response, {}))
                 )
                 with (
                     download,
                     patch.dict(os.environ, {"FIRMS_MAP_KEY": KEY}),
                     patch.object(feed.time, "time", return_value=NOW / 1000),
-                    patch("sys.argv", ["build_feed.py", "--output", str(output)]),
+                    patch("sys.argv", ["build_feed.py", "--output", str(output), "--output-v2", str(output.parent / "v2.json")]),
                     contextlib.redirect_stderr(io.StringIO()) as errors,
                 ):
                     self.assertEqual(1, feed.main())
@@ -231,6 +230,13 @@ class LoopbackTransportTest(unittest.TestCase):
     def test_real_https_download(self):
         self.assertEqual(b"csv fixture", feed.download_once(KEY, SOURCE))
         self.assertEqual(1, self.server.requests)
+
+    def test_real_https_modis_and_three_product_collection(self):
+        self.assertEqual(b"csv fixture", feed.download_once(KEY, "MODIS_NRT"))
+        payloads, errors = feed.download_results(KEY)
+        self.assertEqual(set(feed.PRODUCTS), set(payloads))
+        self.assertEqual({}, errors)
+        self.assertEqual(4, self.server.requests)
 
     def test_slow_drip_is_stopped_by_total_transfer_deadline(self):
         self.server.mode = "slow"
