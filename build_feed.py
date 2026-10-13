@@ -319,6 +319,42 @@ def build_v2(payloads, now, errors=None):
     })
 
 
+def report_input_evidence(payloads, errors, now):
+    """Closed diagnostic counters only; never emit arbitrary upstream field values."""
+    for product in PRODUCTS:
+        if product not in payloads:
+            reason = safe_failure_reason(errors.get(product, ValueError()))
+            print(f"NASA input {product}: unavailable; {reason}", flush=True)
+            continue
+        health, _ = assess_product(payloads[product], product, now)
+        for source, snapshot in health.items():
+            stamp = snapshot["latestMillis"]
+            age = "unknown" if stamp is None else f"{(now - stamp) / 3600000:.3f} h"
+            print(f"NASA input {source}: {snapshot['status']}, age={age}", flush=True)
+        if product != "MODIS_NRT":
+            continue
+        evidence = {"instrumentField": False, "versionField": False,
+                    "rows": 0, "MODIS": 0, "VIIRS": 0, "otherInstrument": 0,
+                    "missingInstrument": 0, "collection61NRT": 0, "T": 0, "A": 0}
+        try:
+            if len(payloads[product]) > MAX_INPUT_BYTES:
+                raise ValueError()
+            reader = csv.DictReader(io.StringIO(payloads[product].decode("utf-8-sig")), strict=True)
+            evidence["instrumentField"] = "instrument" in (reader.fieldnames or [])
+            evidence["versionField"] = "version" in (reader.fieldnames or [])
+            for row in reader:
+                evidence["rows"] += 1
+                value = row.get("instrument")
+                bucket = value if value in ("MODIS", "VIIRS") else "missingInstrument" if value in (None, "") else "otherInstrument"
+                evidence[bucket] += 1
+                evidence["collection61NRT"] += row.get("version") == "6.1NRT"
+                if row.get("satellite") in ("T", "A"):
+                    evidence[row["satellite"]] += 1
+            print("NASA MODIS_NRT schema evidence: " + json.dumps(evidence, sort_keys=True), flush=True)
+        except (UnicodeError, csv.Error, TypeError, ValueError):
+            print("NASA MODIS_NRT schema evidence: invalid input", flush=True)
+
+
 def encode_document(document):
     content = (json.dumps(document, separators=(",", ":"), allow_nan=False) + "\n").encode()
     if len(content) > MAX_OUTPUT_BYTES:
@@ -567,7 +603,12 @@ def main():
                 raise ValueError("FIRMS_MAP_KEY is missing or invalid")
             payloads, errors = download_results(key)
         now = int(time.time() * 1000)
-        document, size, updated_v1 = publish_outputs(payloads, errors, now, args.output, args.output_v2)
+        try:
+            document, size, updated_v1 = publish_outputs(payloads, errors, now, args.output, args.output_v2)
+        except ValueError as error:
+            if str(error) == "No fresh approved NASA source":
+                report_input_evidence(payloads, errors, now)
+            raise
         report_result(document, size, updated_v1, now)
     except Exception as error:
         # No raw upstream payload, secret, URL, or traceback in public workflow logs.

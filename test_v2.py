@@ -274,6 +274,30 @@ class SchemaV2Test(unittest.TestCase):
         with patch.object(feed, "MAX_OUTPUT_BYTES", 100), self.assertRaises(ValueError):
             feed.build_v2(data, NOW)
 
+    def test_closed_schema_evidence_never_prints_upstream_values(self):
+        malicious = "https://upstream/" + KEY
+        raw = modis_payload(modis_row(instrument=malicious), modis_row(satellite="A"))
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            feed.report_input_evidence({"MODIS_NRT": raw}, {N20: ValueError(malicious)}, NOW)
+        log = output.getvalue()
+        self.assertNotIn(malicious, log)
+        self.assertNotIn(KEY, log)
+        evidence = json.loads(log.split("NASA MODIS_NRT schema evidence: ")[1])
+        self.assertTrue(evidence["instrumentField"])
+        self.assertEqual(1, evidence["MODIS"])
+        self.assertEqual(1, evidence["otherInstrument"])
+        self.assertEqual(2, evidence["collection61NRT"])
+        absent = raw.replace(b",instrument", b",unknown")
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            feed.report_input_evidence({"MODIS_NRT": absent}, {}, NOW)
+        evidence = json.loads(output.getvalue().split("NASA MODIS_NRT schema evidence: ")[1])
+        self.assertFalse(evidence["instrumentField"])
+        self.assertEqual(2, evidence["missingInstrument"])
+        self.assertEqual(0, evidence["MODIS"])
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            feed.report_input_evidence({"MODIS_NRT": b"\xff"}, {}, NOW)
+        self.assertIn("schema evidence: invalid input", output.getvalue())
+
     def test_closed_products_and_conflicting_results_fail_closed(self):
         for data, errors in (({"unexpected": b""}, {}), (all_payloads(), {N20: ValueError()}), ({}, {"unknown": ValueError()})):
             with self.assertRaises(ValueError):
