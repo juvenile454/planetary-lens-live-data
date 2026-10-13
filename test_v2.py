@@ -274,6 +274,22 @@ class SchemaV2Test(unittest.TestCase):
         with patch.object(feed, "MAX_OUTPUT_BYTES", 100), self.assertRaises(ValueError):
             feed.build_v2(data, NOW)
 
+    def test_exact_modis_satellite_names_remain_instrument_and_collection_bound(self):
+        named = {"MODIS_NRT": modis_payload(modis_row(satellite="Terra"), modis_row(satellite="Aqua"))}
+        coded = {"MODIS_NRT": modis_payload(modis_row(), modis_row(satellite="A"))}
+        self.assertEqual(feed.build_v2(coded, NOW), feed.build_v2(named, NOW))
+        for bad in ("terra", "AQUA", "Terra ", "Aqua/other", "unknown"):
+            result = document({N20: payload(row()), "MODIS_NRT": modis_payload(modis_row(satellite=bad))})
+            self.assertEqual("partial_viirs", result["mode"])
+        for bad in (modis_row(satellite="Terra", instrument="VIIRS"),
+                    modis_row(satellite="Aqua", version="6.1RT")):
+            result = document({N20: payload(row()), "MODIS_NRT": modis_payload(bad)})
+            self.assertEqual("partial_viirs", result["mode"])
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            feed.report_input_evidence(named, {}, NOW)
+        evidence = json.loads(output.getvalue().split("NASA MODIS_NRT schema evidence: ")[1])
+        self.assertEqual((1, 1, 2), (evidence["Terra"], evidence["Aqua"], evidence["MODIS"]))
+
     def test_closed_schema_evidence_never_prints_upstream_values(self):
         malicious = "https://upstream/" + KEY
         raw = modis_payload(modis_row(instrument=malicious), modis_row(satellite="A"))

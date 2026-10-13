@@ -11,8 +11,9 @@ public JSON. The existing repository Actions secret `FIRMS_MAP_KEY` is used.
 - `data/fire-hotspots-v2.json`: Schema 2, explicit source health and selected mode.
 
 The publisher fetches three fixed Area-API `world/2` products in parallel:
-`VIIRS_NOAA20_NRT`, `VIIRS_NOAA21_NRT`, `MODIS_NRT`. MODIS Terra (`T`) and Aqua
-(`A`) are assessed independently, requiring actual `instrument = MODIS` and
+`VIIRS_NOAA20_NRT`, `VIIRS_NOAA21_NRT`, `MODIS_NRT`. MODIS Terra (`Terra`/`T`) and Aqua
+(`Aqua`/`A`) are assessed independently using an exact closed satellite mapping,
+requiring actual `instrument = MODIS` and
 `version = 6.1NRT`; missing fields and RT/URT never establish NRT freshness.
 
 Deterministic priority (no sensor mixing):

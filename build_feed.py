@@ -50,6 +50,9 @@ SOURCE_PROFILES = {
 }
 MODIS_SOURCES = ("MODIS_TERRA_NRT", "MODIS_AQUA_NRT")
 MODIS_FIELDS = FIELDS | {"version"}
+# Closed satellite values: Area API names plus NASA download/fixture codes.
+# Instrument and collection remain independently required on every row.
+MODIS_SATELLITE_CODES = {"T": "T", "A": "A", "Terra": "T", "Aqua": "A"}
 
 
 def normalize_coordinates(latitude, longitude):
@@ -78,7 +81,10 @@ def parse_row(row, satellite_code, satellite_name, now, instrument="VIIRS"):
     if coordinates is None:
         return None
     latitude, longitude = coordinates
-    if row.get("satellite") != satellite_code or row.get("instrument") != instrument:
+    observed_satellite = row.get("satellite") or ""
+    if instrument == "MODIS":
+        observed_satellite = MODIS_SATELLITE_CODES.get(observed_satellite, "")
+    if observed_satellite != satellite_code or row.get("instrument") != instrument:
         return None
     confidence_percent = None
     if instrument == "MODIS":
@@ -241,7 +247,10 @@ def assess_product(payload, product, now):
         unknown_rows = 0
         codes = {SOURCE_PROFILES[source][1]: source for source in source_ids}
         for row in reader:
-            source = codes.get(str(row.get("satellite", "")))
+            observed_satellite = row.get("satellite") or ""
+            if product == "MODIS_NRT":
+                observed_satellite = MODIS_SATELLITE_CODES.get(observed_satellite, "")
+            source = codes.get(observed_satellite)
             if source is None:
                 unknown_rows += 1
                 continue
@@ -335,7 +344,8 @@ def report_input_evidence(payloads, errors, now):
             continue
         evidence = {"instrumentField": False, "versionField": False,
                     "rows": 0, "MODIS": 0, "VIIRS": 0, "otherInstrument": 0,
-                    "missingInstrument": 0, "collection61NRT": 0, "T": 0, "A": 0}
+                    "missingInstrument": 0, "collection61NRT": 0,
+                    "T": 0, "A": 0, "Terra": 0, "Aqua": 0}
         try:
             if len(payloads[product]) > MAX_INPUT_BYTES:
                 raise ValueError()
@@ -348,7 +358,7 @@ def report_input_evidence(payloads, errors, now):
                 bucket = value if value in ("MODIS", "VIIRS") else "missingInstrument" if value in (None, "") else "otherInstrument"
                 evidence[bucket] += 1
                 evidence["collection61NRT"] += row.get("version") == "6.1NRT"
-                if row.get("satellite") in ("T", "A"):
+                if row.get("satellite") in ("T", "A", "Terra", "Aqua"):
                     evidence[row["satellite"]] += 1
             print("NASA MODIS_NRT schema evidence: " + json.dumps(evidence, sort_keys=True), flush=True)
         except (UnicodeError, csv.Error, TypeError, ValueError):
@@ -603,12 +613,8 @@ def main():
                 raise ValueError("FIRMS_MAP_KEY is missing or invalid")
             payloads, errors = download_results(key)
         now = int(time.time() * 1000)
-        try:
-            document, size, updated_v1 = publish_outputs(payloads, errors, now, args.output, args.output_v2)
-        except ValueError as error:
-            if str(error) == "No fresh approved NASA source":
-                report_input_evidence(payloads, errors, now)
-            raise
+        report_input_evidence(payloads, errors, now)
+        document, size, updated_v1 = publish_outputs(payloads, errors, now, args.output, args.output_v2)
         report_result(document, size, updated_v1, now)
     except Exception as error:
         # No raw upstream payload, secret, URL, or traceback in public workflow logs.
